@@ -1,0 +1,206 @@
+;
+;
+;******************************************************************************
+;
+;	Arquivo de Referência para o desenvolvimento do kernel.
+;
+;	Versão: 2021.1
+;
+;	Áreas de memória
+;
+;	0000 - 7FFF		_KERNEL
+;					Área de Kernel para implementação dos alunos
+;
+;	0100 - 01FF		_VETTAB
+;					Tabela com os vetores das funções do kernel
+;					*** CUIDADO! Esse vetor está no meio da área de código ***
+;
+;	8000 - FF7F		_APP
+;					Área onde será colocado o programa de aplicação.
+;					Esse programa vai fazer o acesso aos periféricos e interrupções, através das funções do Kernel.
+;
+;	FF80 - FFBF 	_IOAREA16
+;					Area de perifericos, acessada na base 16 bits
+;
+;	FFC0 - FFFF		_IOAREA08
+;					Area de perifericos, acessada na base 8 bits
+;					
+;******************************************************************************
+
+
+_KERNEL:	equ	h0000
+_VETTAB:	equ	h0100
+_APP:		equ	h8000
+_IOAREA16:	equ	hFF80
+_IOAREA08:	equ	hFFC0
+
+
+;
+;------------------------------------------------------------------------------
+;	Área reservada para os periféricos
+;------------------------------------------------------------------------------
+
+; Acesso em 16 bits
+		org		_IOAREA16
+		daw		[31]
+IVET:	dw		0			; Vetor de interrupção
+
+; Acesso em 8 bits
+		org		_IOAREA08
+		dab		[23]
+TIMDT:	db		0			; Registro de programação do timer
+INTS:	db		0			; INTERRUPT STATUS: IP x x x . x x IPStec IPStim
+INTE:	db		0			; INTERRUPT ENABLE: IE x x x . x x IEStec IEStim
+TECST:	db		0			; Status do teclado
+TECDT:	db		0			; Dado do teclado
+VISOR:	dab		[36]		; Portas de acesso ao visor
+
+;	
+;------------------------------------------------------------------------------
+;	Ponto de entrada do RESET do processador
+;------------------------------------------------------------------------------
+		org		_KERNEL
+		jmp		_RESET
+
+;
+;------------------------------------------------------------------------------
+;	Area do kernel com os vetores das funções do kernel
+;------------------------------------------------------------------------------
+		org		_VETTAB
+		dw		_kbhit
+		dw		_getchar
+		dw		_putchar
+		dw		_get_clock_status
+		dw		_get_clock_time
+		dw		_turnon_clock
+		dw		_clr_clock
+		
+;	
+;------------------------------------------------------------------------------
+;	Código de RESET (BOOT) do processador/interrupção
+;------------------------------------------------------------------------------
+		org		_VETTAB+h0100
+_RESET:		
+; 1) Desabilitar o sistema de interrupções
+; 2) Inicializar o stack pointer (SP = R6)
+; 3) Inicializar as variáveis internas usadas pelo sistema de interrupções e periféricos (IVET, INTE, etc.)
+; 4) Inicializar as variáveis internas do kernel
+; 5) Inicializar o teclado zerando o byte de estado (TECST, endereço 65498)
+; 6) Inicializar o timer
+; 7) Limpar o visor
+; 8) Habilitar interrupções
+; 9) Retornar para o programa de aplicação com um desvio para o endereço _APP da memória
+		jmp		_APP
+
+;		
+;------------------------------------------------------------------------------
+; Função através da qual pode-se solicitar ao kernel a informação sobre a existência de tecla digitada.
+; A função deve retornar com a informação da existência de tecla, sem aguardar pela digitação de qualquer tecla. 
+; - Parâmetros de entrada: nenhum. 
+; - Parâmetro de saída: registrador R0, com a informação da existência de tecla. 
+; A função retorna no registrador R0 a informação se existe tecla ou não. 
+; - Se há tecla, o valor em R0 será zero; 
+; - Se não há tecla, o valor em R0 será um valor qualquer diferente de zero. 
+;------------------------------------------------------------------------------
+_kbhit:
+		rts		r7
+		
+;		
+;------------------------------------------------------------------------------
+; Função através da qual pode-se solicitar ao kernel que aguarde pela digitação de uma tecla.
+; A função deve retornar o código ASCII da tecla digitada.
+; Portanto, a função deve aguardar pela digitação de uma tecla. 
+; - Parâmetros de entrada: nenhum. 
+; - Parâmetro de saída: registrador R0, com a tecla digitada. 
+; A função só retorna (só termina) quando o usuário digitar alguma tecla.
+; O código ASCII da tecla digitada deve ser retornado no registrador R0. 
+; Sempre que a função “_getchar” for chamada e estiver bloqueada aguardando por uma tecla,
+;     a posição do cursor deve ser apresentado no visor através do símbolo “_” (underscore).
+; Esse símbolo deve ser alternado com o caractere que estiver sendo apresentado nessa posição.
+; Essa alternância deve ter uma periodicidade tal que cada símbolo permaneça no visor por 500ms. 
+;------------------------------------------------------------------------------
+_getchar:
+		rts		r7
+		
+;		
+;------------------------------------------------------------------------------
+; Envia um caractere ASCII para o visor.
+; Esse caractere pode ser um caractere visível ou um caractere de controle. 
+; - Parâmetros de entrada: registrador R5, com o caractere a ser colocado no visor. 
+; - Parâmetro de saída: registrador R0, com o código de erro de retorno. 
+; O código no registrador R5 pode representar caracteres visíveis ou caracteres de controle. 
+; Na inicialização do kernel, o visor deve ser limpo (apagado) e o cursor deve ser posicionado no início do visor. 
+; A função retorna no registrador R0 um código de erro. 
+; - Se não houve erro, o valor em R0 será zero; 
+; - Se houve algum erro ou informação inválida de entrada, o valor em R0 será um valor qualquer diferente de zero. 
+;------------------------------------------------------------------------------
+_putchar:
+		rts		r7
+		
+;		
+;------------------------------------------------------------------------------
+; Essa função fornece as informações relativas à situação atual de cada relógio, 
+; no que diz respeito à sua visibilidade e se está andando. 
+; - Parâmetros de entrada: registrador R5, com o identificador do relógio a ser lido.
+;   Esse valor pode ser 0 (zero) ou 1 (um). 
+; Outros valores devem ser ignorados. 
+; - Parâmetro de saída: registrador R0, com a indicação do estado do relógio (visibilidade e se está parado). 
+; No retorno da função, o registrador R0 conterá as informações do estado do relógio em seus bits 0 e bit 1. 
+; O bit 0, quando ligado (valor “1”), indica que o relógio está visível;
+; O bit 1, quando ligado (valor “1”), indica que o relógio está andando. 
+;------------------------------------------------------------------------------
+_get_clock_status:
+		rts		r7
+	
+;		
+;------------------------------------------------------------------------------
+; Essa função fornece o valor atual de cada relógio.
+; Essa informação é fornecida como um número inteiro de segundos.
+; Como cada relógio tem minutos e segundos,
+;     o valor fornecido deverá ser o resultado da aplicação da seguinte fórula (60*MIN+SEG). 
+; - Parâmetros de entrada: registrador R5, com o identificador do relógio a ser lido.
+;   Esse valor pode ser 0 (zero) ou 1 (um). Outros valores devem ser ignorados. 
+; - Parâmetro de saída: registrador R0, com o número de segundos atualmente presentes no relógio. 
+; No retorno da função, o registrador R0 conterá o número de segundos correspondentes à informação atual no relógio.
+; Essa informação corresponde àquela presente no relógio, independentemente de seu estado (visível/invisível ou parado/andando). 
+;------------------------------------------------------------------------------
+_get_clock_time:
+		rts		r7
+		
+;		
+;------------------------------------------------------------------------------
+; Essa função é usada para indicar ao kernel se o relógio deve “andar” ou “parar”.  
+; - Parâmetros de entrada: 
+;   - registrador R5, com o identificador do relógio a ser ativado/desativado.
+;     Esse valor pode ser 0 (zero) ou 1 (um). Outros valores devem ser ignorados; 
+;   - registrador R4, com a indicação do estado a ser colocado o relógio.
+;     Esse valor pode ser 0 (zero), caso o relógio deva parar,
+;     ou um valor diferente de 0 (zero), caso o relógio deva andar. 
+; - Parâmetro de saída: registrador R0, com o código de erro de retorno. 
+; A função retorna no registrador R0 um código de erro. 
+; - Se não houve erro, o valor em R0 será zero; 
+; - Se houve algum erro ou informação inválida de entrada,
+;   o valor em R0 será um valor qualquer diferente de zero. 
+;------------------------------------------------------------------------------
+_turnon_clock:
+		rts		r7
+		
+;		
+;------------------------------------------------------------------------------
+; Essa função é usada para indicar ao kernel que o relógio deve ser zerado.
+; Ou seja, minutos e horas armazenado no relógio devem ser zerados. 
+; - Parâmetros de entrada: registrador R5, com o identificador do relógio a ser zerado.
+;   Esse valor pode ser 0 (zero) ou  1 (um). Outros valores devem ser ignorados; 
+; - Parâmetro de saída: registrador R0, com o código de erro de retorno. 
+; A função retorna no registrador R0 um código de erro. 
+; - Se não houve erro, o valor em R0 será zero; 
+; - Se houve algum erro ou informação inválida de entrada,
+;          o valor em R0 será um valor qualquer diferente de zero. 
+;------------------------------------------------------------------------------
+_clr_clock:
+		rts		r7
+
+
+
+
+

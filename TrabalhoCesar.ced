@@ -1,0 +1,1342 @@
+;*************************************************************************************************************************************************
+;
+;	Arquivo de Referência para o desenvolvimento do kernel.
+;
+;	Versão: 2021.1
+;
+;	Áreas de memória
+;
+;	0000 - 7FFF		_KERNEL
+;					Área de Kernel para implementação dos alunos
+;
+;	0100 - 01FF		_VETTAB
+;					Tabela com os vetores das funções do kernel
+;					*** CUIDADO! Esse vetor está no meio da área de código ***
+;
+;	8000 - FF7F		_APP
+;					Área onde será colocado o programa de aplicação.
+;					Esse programa vai fazer o acesso aos periféricos e interrupções, através das funções do Kernel.
+;
+;	FF80 - FFBF 		_IOAREA16
+;					Area de perifericos, acessada na base 16 bits
+;
+;	FFC0 - FFFF		_IOAREA08
+;					Area de perifericos, acessada na base 8 bits
+;					
+;**************************************************************************************************************************************************
+
+_KERNEL:	equ	h0000		;endereço de onde começa o kernel
+_VETTAB:	equ	h0100		;endereço onde começa os vetores	
+_APP:		equ	h8000		;endereço onde começa a aplicação 	
+_IOAREA16:	equ	hFF80		;onde começa a área de periféricos de acesso em 2 bytes (como memoria)
+_IOAREA08:	equ	hFFC0		;onde começam os periféricos de acesso byte a byte
+
+;
+;------------------------------------------------------------------------------
+;	Área reservada para os periféricos
+;------------------------------------------------------------------------------
+
+; Acesso em 16 bits - 2 bytes
+
+		org		_IOAREA16
+
+		daw		[31]
+IVET:	dw		0			; Vetor de interrupção
+
+; Acesso em 8 bits - byte a byte
+
+		org		_IOAREA08
+
+		dab		[23]
+TIMDT:	db		0			; Registro de programação do timer
+INTS:	db		0			; INTERRUPT STATUS: IP x x x . x x IPStec IPStim
+INTE:	db		0			; INTERRUPT ENABLE: IE x x x . x x IEStec IEStim
+TECST:	db		0			; Status do teclado
+TECDT:	db		0			; Dado do teclado
+VISOR:	dab	        [36]			; Portas de acesso ao visor [ 0-21(texto) 22-28(relógio 0) 29-35(relógio 1)]
+
+;	
+;------------------------------------------------------------------------------
+;	Ponto de entrada do RESET do processador
+;------------------------------------------------------------------------------
+		org		_KERNEL 	;org h0000 - inicio do Kernel 
+
+		jmp		_RESET		;o kernel começa com a função reset e em seguida pula para a aplicação que chamará o kernel 
+
+;
+;------------------------------------------------------------------------------
+;	Area do kernel com os vetores das funções do kernel
+; através destes vetores a aplicação chama as funções (são como ponteiros)
+;------------------------------------------------------------------------------
+		org		_VETTAB		;org h0100
+
+		dw		_kbhit
+		dw		_getchar
+		dw		_putchar
+		dw		_get_clock_status
+		dw		_get_clock_time
+		dw		_turnon_clock
+		dw		_clr_clock
+		
+;	
+;-----------------------------------------------------------------------------------------------------------------------------------
+;	Código de RESET (BOOT) do processador/interrupção
+;;-----------------------------------------------------------------------------------------------------------------------------------
+		org		_VETTAB+h0100
+_RESET:		
+; 1) Desabilitar o sistema de interrupções
+
+		CLR 	INTE 						;INTE = (00000000)
+
+; 2) Inicializar o stack pointer (SP = R6)
+
+		MOV 	#H7FFF, R6					;pilha começa no ultimo endereço antes da aplicação para ter o maior espaço possível
+
+; 3) Inicializar as variáveis internas usadas pelo sistema de interrupções e periféricos (IVET, INTE, etc.)
+
+		MOV 	#ISR, IVET					;ISR é onde começa a interrupção
+		CLR 	INTS
+		CLR 	INTE
+
+; 4) Inicializar as variáveis internas do kernel
+
+		MOV	#VISOR, Posicao		;Posicao = VISOR
+		MOV	#'_', Cursor
+	
+; 5) Inicializar o teclado zerando o byte de estado (TECST, endereço 65498)
+
+		CLR 	TECST
+
+; 6) Inicializar o timer
+
+		MOV 	#100, TIMDT
+
+; 7) Limpar o visor
+
+		MOV 	#65500, R2
+LoopLimpa:	MOV	#' ',(R2)
+		INC	R2
+		BNE     LoopLimpa
+
+; 8) Habilitar interrupções
+
+		MOV #131, INTE					;INTE = (10000000)
+
+; 9) Retornar para o programa de aplicação com um desvio para o endereço _APP da memória
+
+		JMP		_APP
+
+;		
+;-----------------------------------------------------------------------------------------------------------------------------------
+; Função através da qual pode-se solicitar ao kernel a informação sobre a existência de tecla digitada.
+; A função deve retornar com a informação da existência de tecla, sem aguardar pela digitação de qualquer tecla. 
+; - Parâmetros de entrada: nenhum. 
+; - Parâmetro de saída: registrador R0, com a informação da existência de tecla. 
+; A função retorna no registrador R0 a informação se existe tecla ou não. 
+; - Se há tecla, o valor em R0 será zero; 
+; - Se não há tecla, o valor em R0 será um valor qualquer diferente de zero. 
+;-----------------------------------------------------------------------------------------------------------------------------------
+_kbhit:
+		;AND 		H7f, INTE	;IE=0
+		MOV 		#1, R0		;se não ha tecla, R0 recebe 1					
+		CMP		Teclado, #0	;Verifica se a variável de teclado está vazia
+		BEQ		NaoHaTecla	;se o flag Z ativado desvia 
+		CLR		R0      	;se há tecla, não desviou, R0 recebe 0 
+NaoHaTecla:
+		;OR		#h80,INTE	;IE = 1
+		rts		r7
+				
+;		
+;-----------------------------------------------------------------------------------------------------------------------------------
+; Função através da qual pode-se solicitar ao kernel que aguarde pela digitação de uma tecla.
+; A função deve retornar o código ASCII da tecla digitada.
+; Portanto, a função deve aguardar pela digitação de uma tecla. 
+; - Parâmetros de entrada: nenhum. 
+; - Parâmetro de saída: registrador R0, com a tecla digitada. 
+; A função só retorna (só termina) quando o usuário digitar alguma tecla.
+; O código ASCII da tecla digitada deve ser retornado no registrador R0. 
+; Sempre que a função “_getchar” for chamada e estiver bloqueada aguardando por uma tecla,
+;     a posição do cursor deve ser apresentado no visor através do símbolo “_” (underscore).
+; Esse símbolo deve ser alternado com o caractere que estiver sendo apresentado nessa posição.
+; Essa alternância deve ter uma periodicidade tal que cada símbolo permaneça no visor por 500ms. 
+;-----------------------------------------------------------------------------------------------------------------------------------
+_getchar:
+		MOV	Posicao, R1
+		MOV	(R1), TeclaNoCursor
+		DEC	R1
+		MOV	(R1), TeclaNoant
+		
+		MOV	#1, KbhitAtiva
+LoopKbhit:	JSR	R7, _kbhit
+		TST	R0
+		BNE	LoopKbhit
+		CLR	KbhitAtiva
+		
+		MOV	Teclado, R0 
+		CLR	Teclado	
+
+		RTS	R7
+;		
+;-----------------------------------------------------------------------------------------------------------------------------------
+; Envia um caractere ASCII para o visor.
+; Esse caractere pode ser um caractere visível ou um caractere de controle. 
+; - Parâmetros de entrada: registrador R5, com o caractere a ser colocado no visor. 
+; - Parâmetro de saída: registrador R0, com o código de erro de retorno. 
+; O código no registrador R5 pode representar caracteres visíveis ou caracteres de controle. 
+; Na inicialização do kernel, o visor deve ser limpo (apagado) e o cursor deve ser posicionado no início do visor. 
+; A função retorna no registrador R0 um código de erro. 
+; - Se não houve erro, o valor em R0 será zero; 
+; - Se houve algum erro ou informação inválida de entrada, o valor em R0 será um valor qualquer diferente de zero. 
+;-----------------------------------------------------------------------------------------------------------------------------------
+_putchar:
+		CMP	R5, #H0D
+		BEQ	CarriageReturn
+		JMP	TestaBackspace
+CarriageReturn: 
+		MOV	#VISOR, Posicao
+		CLR	PosNoVisor
+		JMP	FimPutChar
+
+
+TestaBackspace: CMP	R5, #H08
+		BEQ	BackSpace
+		JMP	CaracVis
+BackSpace:	CMP	#VISOR, Posicao
+		BEQ	FazerNada
+		DEC	PosNoVisor
+		DEC	Posicao
+		MOV	Posicao, R3
+		MOV	(R3), TeclaNoant
+		JMP	FimPutChar
+		
+FazerNada:	JMP	FimPutChar
+
+
+CaracVis:	CMP	PosNoVisor, #22
+		BEQ	FimPutChar
+		TST	R5
+		BEQ	FimPutChar
+		
+		CMP	R5,#' '				;if (r0>=' ' && r0<='z')
+		BLT	ErroPutChar
+		CMP	R5,#'z'
+		BGT	ErroPutChar
+	
+		MOV	Posicao, R1
+PutChar:	MOV	R5, (R1)
+		INC	R1
+		MOV	R1, Posicao
+		INC	PosNoVisor
+		
+		CLR	R0
+		JMP	FimPutChar
+		
+ErroPutChar:	MOV	#1, R0			;se houve erro, R0 diferente de 0
+
+FimPutChar:	RTS	R7
+
+		
+;		
+;----------------------------------------------------------------------------------------------------------------------------------
+; Essa função fornece as informações relativas à situação atual de cada relógio, 
+; no que diz respeito à sua visibilidade e se está andando. 
+; - Parâmetros de entrada: registrador R5, com o identificador do relógio a ser lido.
+;   Esse valor pode ser 0 (zero) ou 1 (um). 
+; Outros valores devem ser ignorados. 
+; - Parâmetro de saída: registrador R0, com a indicação do estado do relógio (visibilidade e se está parado). 
+; No retorno da função, o registrador R0 conterá as informações do estado do relógio em seus bits 0 e bit 1. 
+; O bit 0, quando ligado (valor “1”), indica que o relógio está visível;
+; O bit 1, quando ligado (valor “1”), indica que o relógio está andando. 
+;
+; 00 = parado e não visível (0)
+; 01 = parado e visível (1)
+; 10 = andando e não visível (2)
+; 11 = andando e visível (3)
+;-----------------------------------------------------------------------------------------------------------------------------------
+_get_clock_status:
+
+			CMP		R5, #0
+			BEQ		StatusClock0
+			CMP		R5, #1
+			BEQ		StatusClock1		
+			JMP		FimStatusClock  ;valor diferente de 0 ou 1, é ignorado
+
+;---------------------------------------
+StatusClock0:   	TST		AndandoRel0	
+			BEQ		Parado0		;se for 0 está parado
+			JMP		Andando0 
+
+Parado0: 		TST		PrintaRel0
+			BEQ		ParadoInvisivel0
+			MOV		#1, R0		;parado e visível = 01 = 1
+			JMP		FimStatusClock
+
+Andando0:		TST		PrintaRel0
+			BEQ		AndandoInvisivel0
+			MOV		#3, R0		;andando e visível = 11 = 3
+			JMP		FimStatusClock		
+	
+ParadoInvisivel0: 	MOV 		#0, R0   	;R0 recebe 00
+			JMP		FimStatusClock
+
+AndandoInvisivel0:	MOV		#2, R0		;R0 recebe 10 = 2 
+			JMP		FimStatusClock
+;---------------------------------------
+
+;---------------------------------------
+StatusClock1:   	TST		AndandoRel1	
+			BEQ		Parado1		;se for 0 está parado
+			JMP		Andando1 
+
+Parado1: 		TST		PrintaRel1
+			BEQ		ParadoInvisivel1
+			MOV		#1, R0		;parado e visível = 01 = 1
+			JMP		FimStatusClock
+
+Andando1:		TST		PrintaRel1
+			BEQ		AndandoInvisivel1
+			MOV		#3, R0		;andando e visível = 11 = 3
+			JMP		FimStatusClock		
+	
+ParadoInvisivel1: 	MOV 		#0, R0   	;R0 recebe 00
+			JMP		FimStatusClock
+
+AndandoInvisivel1:	MOV		#2, R0		;R0 recebe 10 = 2 
+			JMP		FimStatusClock
+;---------------------------------------
+
+FimStatusClock:		RTS		R7
+	
+;		
+;-----------------------------------------------------------------------------------------------------------------------------------
+; Essa função fornece o valor atual de cada relógio.
+; Essa informação é fornecida como um número inteiro de segundos.
+; Como cada relógio tem minutos e segundos,
+;     o valor fornecido deverá ser o resultado da aplicação da seguinte fórula (60*MIN+SEG). 
+; - Parâmetros de entrada: registrador R5, com o identificador do relógio a ser lido.
+;   Esse valor pode ser 0 (zero) ou 1 (um). Outros valores devem ser ignorados. 
+; - Parâmetro de saída: registrador R0, com o número de segundos atualmente presentes no relógio. 
+; No retorno da função, o registrador R0 conterá o número de segundos correspondentes à informação atual no relógio.
+; Essa informação corresponde àquela presente no relógio, independentemente de seu estado (visível/invisível ou parado/andando). 
+;-----------------------------------------------------------------------------------------------------------------------------------
+_get_clock_time:
+		CMP	R5, #0
+		BEQ	GetClock0
+		CMP     R5, #1
+		BEQ	GetClock1
+		JMP	FimGetClock
+
+GetClock0:	MOV	ContSegTotal0, R0
+		JMP	FimGetClock
+
+GetClock1:	MOV	ContSegTotal1, R0
+		JMP	FimGetClock
+
+FimGetClock:		rts		r7
+		
+;		
+;-----------------------------------------------------------------------------------------------------------------------------------
+; Essa função é usada para indicar ao kernel se o relógio deve “andar” ou “parar”.  
+; - Parâmetros de entrada: 
+;   - registrador R5, com o identificador do relógio a ser ativado/desativado.
+;     Esse valor pode ser 0 (zero) ou 1 (um). Outros valores devem ser ignorados; 
+;   - registrador R4, com a indicação do estado a ser colocado o relógio.
+;     Esse valor pode ser 0 (zero), caso o relógio deva parar,
+;     ou um valor diferente de 0 (zero), caso o relógio deva andar. 
+; - Parâmetro de saída: registrador R0, com o código de erro de retorno. 
+; A função retorna no registrador R0 um código de erro. 
+; - Se não houve erro, o valor em R0 será zero; 
+; - Se houve algum erro ou informação inválida de entrada,
+;   o valor em R0 será um valor qualquer diferente de zero. 
+;-----------------------------------------------------------------------------------------------------------------------------------
+_turnon_clock:
+		CLR		R0
+		CMP		R5, #0
+		BEQ		TurnOn0
+		CMP		R5, #1
+		BEQ		TurnOn1
+		MOV		R5, R0			;valor diferente de 0 ou 1, é erro
+		JMP		FimTurnOnClock
+
+TurnOn0:	TST		R4
+		BEQ		TurnOff0		;R4 em 0 desliga o relogio
+		MOV		#1, AndandoRel0		;R4 diferente de 0 anda o relogio = Andando recebe 1
+		JMP		FimTurnOnClock 	
+TurnOff0:	CLR		AndandoRel0		;Andando recebe 0
+		JMP		FimTurnOnClock 	
+
+TurnOn1:	TST		R4
+		BEQ		TurnOff1		;R4 em 0 desliga o relogio
+		MOV		#1, AndandoRel1		;R4 diferente de 0 anda o relogio = Andando recebe 1
+		JMP		FimTurnOnClock 	
+TurnOff1:	CLR		AndandoRel1		;Andando recebe 0
+		JMP		FimTurnOnClock
+
+FimTurnOnClock: RTS		R7
+		
+;		
+;-----------------------------------------------------------------------------------------------------------------------------------
+; Essa função é usada para indicar ao kernel que o relógio deve ser zerado.
+; Ou seja, minutos e horas armazenado no relógio devem ser zerados. 
+; - Parâmetros de entrada: registrador R5, com o identificador do relógio a ser zerado.
+;   Esse valor pode ser 0 (zero) ou  1 (um). Outros valores devem ser ignorados; 
+; - Parâmetro de saída: registrador R0, com o código de erro de retorno. 
+; A função retorna no registrador R0 um código de erro. 
+; - Se não houve erro, o valor em R0 será zero; 
+; - Se houve algum erro ou informação inválida de entrada,
+;          o valor em R0 será um valor qualquer diferente de zero. 
+;-----------------------------------------------------------------------------------------------------------------------------------
+_clr_clock:
+		CLR		R0
+		CMP		R5, #0		;Testo R5 para ver qual relogio devo zerar
+		BEQ		ZerarRel0
+		CMP		R5, #1
+		BEQ		ZerarRel1
+		MOV		R5, R0		;valor diferente de 0 ou 1, é erro
+		JMP		FimClrClock
+
+ZerarRel0:	CLR		PosRel00	;Zerar relogio 0
+		CLR		PosRel01	
+		CLR		PosRel02
+		CLR		PosRel03
+		CLR		ContUSeg0	;Zero os contadores do relogio 0
+		CLR		ContDSeg0
+		CLR		ContUMin0
+		CLR		ContDMin0
+		CLR		ContSegTotal0
+		CLR		ContIntTotal0
+		JMP		FimClrClock
+
+ZerarRel1:	CLR		PosRel10	;Zerar relogio 1
+		CLR		PosRel11
+		CLR		PosRel12
+		CLR		PosRel13
+		CLR		ContUSeg1	;Zero os contadores do relogio 1
+		CLR		ContDSeg1
+		CLR		ContUMin1
+		CLR		ContDMin1
+		CLR		ContSegTotal1
+		CLR		ContIntTotal1
+		JMP		FimClrClock
+
+FimClrClock:	RTS		R7
+
+;-----------------------------------------------------------------------------------------------------------------------------------
+;-----------------------------------------------------------------------------------------------------------------------------------
+;-----------------------------------------------------------------------------------------------------------------------------------
+;-----------------------------------------------------------------------------------------------------------------------------------
+
+;TRATADOR DE INTERRUPÇÕES:
+
+ISR:
+		MOV		R0,-(R6)	; Salva registradores na pila
+		MOV		R1,-(R6)
+		MOV		R2,-(R6)
+		MOV		R3,-(R6)
+		MOV		R4,-(R6)
+		MOV		R5,-(R6)
+
+		
+		MOV		INTS,R0		; Verifica se a interrupcao veio do teclado
+		AND		#2, R0		
+		BEQ		TesteTimer	; Não veio do teclado, pode ter vindo do timer
+ 		JSR		R7,ISRtec	; Se veio do teclado, tratamento da interrupcao do teclado
+		JMP		ISR2
+TesteTimer:	MOV		INTS, R0
+		AND		#1, R0
+		BEQ		ISRFim		;se não veio nem do teclado nem do timer, pula para fim 
+		JSR		R7, ISRtim	;se veio do timer, tratamento de interrupcao do timer
+		JMP		ISR3
+
+ISR2:		AND		#HFFFD,INTS	; Desliga bit de INT TECLADO
+		JMP		ISRFim
+
+ISR3: 		AND		#hFFFE,INTS	; Desliga bit de INT TIMER
+
+ISRFim:
+		MOV		(R6)+,R5	; Retorna os registradores da pilha
+		MOV		(R6)+,R4
+		MOV		(R6)+,R3
+		MOV		(R6)+,R2
+		MOV		(R6)+,R1
+		MOV		(R6)+,R0
+
+		RTI				; Return From Interrupt
+
+;------------------------------------------------------------------------------------------------------------------------------------
+
+; Tratamento das interrupções de teclado
+
+ISRtec:		JMP	TesteTeclaRel
+FimTeste:
+		JMP	TeclaValida
+
+FimISRtec:	CLR	TECST
+		RTS	R7			
+		
+				
+		;primeiro testa se foi uma tecla de ativação dos relogios
+TesteTeclaRel:	CMP	TECDT, #','		;Se a tecla for , não vai para R0
+		BEQ	NotPrintRel0
+		CMP	TECDT, #'<'		;Se a tecla for < não vai para R0
+		BEQ	NotPrintRel0
+		CMP	TECDT, #'.'		;Se a tecla for . não vai para R0
+		BEQ	NotPrintRel1
+		CMP	TECDT, #'>'		;Se a tecla for > não vai para R0
+		BEQ	NotPrintRel1
+		JMP	FimTeste
+
+NotPrintRel0:   CLR	Teclado
+		TST	PrintaRel0		;Se printa estava em 0
+		BEQ	Recebe01		;Vai receber 1
+		CLR     PrintaRel0		;Se não era 0, era 1, recebe 0
+		JMP	FimISRtec
+Recebe01:	MOV	#1, PrintaRel0		;Recebe 1
+		JMP	FimISRtec
+
+NotPrintRel1:   CLR	Teclado
+		TST	PrintaRel1		;Se printa estava em 0
+		BEQ	Recebe11		;Vai receber 1
+		CLR     PrintaRel1		;Se não era 0, era 1, recebe 0
+		JMP	FimISRtec
+Recebe11:	MOV	#1, PrintaRel1		;Recebe 1
+		JMP	FimISRtec
+
+
+TeclaValida: 	MOV		#Teclado, R1				; 		
+		mov		(R1), R0
+		and		#HFF00,R0
+		or		TECDT,r0
+		mov		r0,Teclado
+
+		;MOV	TECDT, Teclado		;PODE DAR ERRADO
+		JMP	FimISRtec
+			
+
+;------------------------------------------------------------------------------------------------------------------------------------
+
+; Tratamento das interrupções de timer
+
+ISRtim:		JSR		R7, AndarRelogios
+		CMP		PrintaRel0, #1
+		BEQ		Rel0Vis
+		JSR		R7, Rel0Invisivel
+		JMP		TstVisRel1
+Rel0Vis:	JSR		R7, PrintarRel0
+TstVisRel1:	CMP		PrintaRel1, #1
+		BEQ		Rel1Vis
+		JSR		R7, Rel1Invisivel
+		JMP		NenhumVis
+Rel1Vis:	JSR		R7, PrintarRel1
+NenhumVis:
+		CMP		#1, KbhitAtiva
+		BNE		FimISRtim
+		JSR		R7, PiscarCursor
+
+FimISRtim:	RTS		R7
+			
+
+;-----------------------------------------------------------------------------------------------------------------------
+
+	
+AndarRelogios:
+		CMP	#1, AndandoRel0
+		BEQ	IncConts0
+TestaAnda1:	CMP	#1, AndandoRel1
+		BEQ	IncConts1
+FimTesteAnda:	JMP	FimAndarRel
+
+IncConts0:	INC	ContUSeg0	; A cada interrupcao (100ms), incrementa contadores de interrupcoes 0
+		INC	ContDSeg0
+		INC	ContUMin0
+		INC	ContDMin0
+		INC	ContIntTotal0
+		JMP	IncPosRel0
+
+IncConts1:	INC	ContUSeg1	; A cada interrupcao (100ms), incrementa contadores de interrupcoes 1
+		INC	ContDSeg1
+		INC	ContUMin1
+		INC	ContDMin1
+		INC	ContIntTotal1
+		JMP	IncPosRel1
+
+IncPosRel0:	CMP	ContIntTotal0, #10
+		BEQ	IncSegTot0
+		JMP	IncUseg0
+IncSegTot0:	INC	ContSegTotal0
+		CLR	ContIntTotal0
+
+IncUseg0:	CMP	ContUSeg0, #10		;Se passaram 10 interrupcoes, passou 1 segundo
+		BEQ	IncPosRel00
+		JMP 	TesteDseg
+IncPosRel00:	INC	PosRel00		;incrementa unidades de segundos 
+		CLR     ContUSeg0	
+
+TesteDseg:	CMP	ContDSeg0, #100		;Se passaram 100 interrupcoes, passou 10 segundos
+		BEQ	IncPosRel01
+		JMP 	TesteUmin
+IncPosRel01:	INC	PosRel01		;incrementa dezena de segundos 
+		CMP	PosRel01, #6
+		BEQ	ZeraDseg0
+		JMP	FimDseg0
+ZeraDseg0:	CLR	PosRel01
+FimDseg0:	CLR     ContDSeg0
+
+TesteUmin:	CMP	ContUMin0, #600		;Se passaram 600 interrupcoes, passou 60 segundos = 1 minuto
+		BEQ	IncPosRel02
+		JMP 	TesteDmin
+IncPosRel02:	INC	PosRel02		;incrementa unidades de minutos 
+		CLR     ContUMin0
+
+TesteDmin:	CMP	ContDMin0, #6000	;Se passaram 6000 interrupcoes, passou 600 segundos = 10 minutos
+		BEQ	IncPosRel03
+		JMP 	TestaAnda1
+IncPosRel03:	INC	PosRel03		;incrementa dezena de minutos 
+		CLR     ContDMin0
+		JMP 	TestaAnda1
+
+IncPosRel1:	CMP	ContIntTotal1, #10
+		BEQ	IncSegTot1
+		JMP	IncUseg1
+IncSegTot1:	INC	ContSegTotal1
+		CLR	ContIntTotal1
+
+IncUseg1:	CMP	ContUSeg1, #10		;Se passaram 10 interrupcoes, passou 1 segundo
+		BEQ	IncPosRel10
+		JMP 	TesteDseg1
+IncPosRel10:	INC	PosRel10			;incrementa unidades de segundos 
+		CLR     ContUSeg1
+
+TesteDseg1:	CMP	ContDSeg1, #100		;Se passaram 100 interrupcoes, passou 10 segundos
+		BEQ	IncPosRel11
+		JMP 	TesteUmin1
+IncPosRel11:	INC	PosRel11			;incrementa dezena de segundos 
+		CMP	PosRel11, #6
+		BEQ	ZeraDseg1
+		JMP	FimDseg1
+ZeraDseg1:	CLR	PosRel11
+FimDseg1:	CLR     ContDSeg1
+		
+
+TesteUmin1:	CMP	ContUMin1, #600		;Se passaram 600 interrupcoes, passou 60 segundos = 1 minuto
+		BEQ	IncPosRel12
+		JMP 	TesteDmin1
+IncPosRel12:	INC	PosRel12			;incrementa unidades de minutos 
+		CLR     ContUMin1
+
+TesteDmin1:	CMP	ContDMin1, #6000		;Se passaram 6000 interrupcoes, passou 600 segundos = 10 minutos
+		BEQ	IncPosRel13
+		JMP 	FimTesteAnda
+IncPosRel13:	INC	PosRel13			;incrementa dezena de minutos 
+		CLR     ContDMin1
+		
+FimAndarRel:	RTS	R7
+
+
+;-----------------------------------------------------------------------------------------------------------------------
+
+Rel0Invisivel:
+
+		MOV	#' ', 65528
+		MOV	#' ', 65527
+		MOV	#' ', 65526
+		MOV	#' ', 65525
+		MOV	#' ', 65524
+		RTS	R7
+		
+PrintarRel0:	JSR	R7, Printar00
+		JSR	R7, Printar01
+		JSR	R7, Printar02
+		JSR	R7, Printar03
+		MOV	#':', 65526
+		RTS	R7
+		
+Printar00:	CMP	PosRel00, #10
+		BNE	Continua0
+		CLR	PosRel10
+Continua0:	TST	PosRel00
+		BEQ	Vai000
+		JMP	NaoVai000
+Vai000:		JSR     R7, Eh0
+		MOV	R4, 65528
+		RTS	R7
+
+NaoVai000:	CMP	PosRel00, #1
+		BEQ	Vai001
+		JMP	NaoVai001
+Vai001:		JSR     R7, Eh1
+		MOV	R4, 65528
+		RTS	R7
+
+NaoVai001:	CMP	PosRel00, #2
+		BEQ	Vai002
+		JMP	NaoVai002
+Vai002:		JSR     R7, Eh2
+		MOV	R4, 65528
+		RTS	R7
+
+NaoVai002:	CMP	PosRel00, #3
+		BEQ	Vai003
+		JMP	NaoVai003
+Vai003:		JSR     R7, Eh3
+		MOV	R4, 65528
+		RTS	R7
+
+NaoVai003:	CMP	PosRel00, #4
+		BEQ	Vai004
+		JMP	NaoVai004
+Vai004:		JSR     R7, Eh4
+		MOV	R4, 65528
+		RTS	R7
+
+NaoVai004:	CMP	PosRel00, #5
+		BEQ	Vai005
+		JMP	NaoVai005
+Vai005:		JSR     R7, Eh5
+		MOV	R4, 65528
+		RTS	R7
+
+NaoVai005:	CMP	PosRel00, #6
+		BEQ	Vai006
+		JMP	NaoVai006
+Vai006:		JSR     R7, Eh6
+		MOV	R4, 65528
+		RTS	R7
+
+NaoVai006:	CMP	PosRel00, #7
+		BEQ	Vai007
+		JMP	NaoVai007
+Vai007:		JSR     R7, Eh7
+		MOV	R4, 65528
+		RTS	R7
+
+NaoVai007:	CMP	PosRel00, #8
+		BEQ	Vai008
+		JMP	NaoVai008
+Vai008:		JSR     R7, Eh8
+		MOV	R4, 65528
+		RTS	R7
+
+NaoVai008:	CMP	PosRel00, #9
+		BEQ	Vai009
+		JMP	NaoVai009
+Vai009:		JSR     R7, Eh9
+		MOV	R4, 65528
+NaoVai009:	RTS	R7
+
+;---------------------------------------
+
+
+Printar01:	TST	PosRel01
+		BEQ	Vai010
+		JMP	NaoVai010
+Vai010:		JSR     R7, Eh0
+		MOV	R4, 65527
+		RTS	R7
+
+NaoVai010:	CMP	PosRel01, #1
+		BEQ	Vai011
+		JMP	NaoVai011
+Vai011:		JSR     R7, Eh1
+		MOV	R4, 65527
+		RTS	R7
+
+NaoVai011:	CMP	PosRel01, #2
+		BEQ	Vai012
+		JMP	NaoVai012
+Vai012:		JSR     R7, Eh2
+		MOV	R4, 65527
+		RTS	R7
+
+NaoVai012:	CMP	PosRel01, #3
+		BEQ	Vai013
+		JMP	NaoVai013
+Vai013:		JSR     R7, Eh3
+		MOV	R4, 65527
+		RTS	R7
+
+NaoVai013:	CMP	PosRel01, #4
+		BEQ	Vai014
+		JMP	NaoVai014
+Vai014:		JSR     R7, Eh4
+		MOV	R4, 65527
+		RTS	R7
+
+NaoVai014:	CMP	PosRel01, #5
+		BEQ	Vai015
+		JMP	NaoVai015
+Vai015:		JSR     R7, Eh5
+		MOV	R4, 65527
+		RTS	R7
+
+NaoVai015:	CMP	PosRel01, #6
+		BEQ	Vai016
+		JMP	NaoVai016
+Vai016:		JSR     R7, Eh6
+		MOV	R4, 65527
+		RTS	R7
+
+NaoVai016:	CMP	PosRel01, #7
+		BEQ	Vai017
+		JMP	NaoVai017
+Vai017:		JSR     R7, Eh7
+		MOV	R4, 65527
+		RTS	R7
+
+NaoVai017:	CMP	PosRel01, #8
+		BEQ	Vai018
+		JMP	NaoVai018
+Vai018:		JSR     R7, Eh8
+		MOV	R4, 65527
+		RTS	R7
+
+NaoVai018:	CMP	PosRel01, #9
+		BEQ	Vai019
+		JMP	NaoVai019
+Vai019:		JSR     R7, Eh9
+		MOV	R4, 65527
+NaoVai019:	RTS	R7
+
+;---------------------------------------
+
+
+Printar02:	TST	PosRel02
+		BEQ	Vai020
+		JMP	NaoVai020
+Vai020:		JSR     R7, Eh0
+		MOV	R4, 65525
+		RTS	R7
+
+NaoVai020:	CMP	PosRel02, #1
+		BEQ	Vai021
+		JMP	NaoVai021
+Vai021:		JSR     R7, Eh1
+		MOV	R4, 65525
+		RTS	R7
+
+NaoVai021:	CMP	PosRel02, #2
+		BEQ	Vai022
+		JMP	NaoVai022
+Vai022:		JSR     R7, Eh2
+		MOV	R4, 65525
+		RTS	R7
+
+NaoVai022:	CMP	PosRel02, #3
+		BEQ	Vai023
+		JMP	NaoVai023
+Vai023:		JSR     R7, Eh3
+		MOV	R4, 65525
+		RTS	R7
+
+NaoVai023:	CMP	PosRel02, #4
+		BEQ	Vai024
+		JMP	NaoVai024
+Vai024:		JSR     R7, Eh4
+		MOV	R4, 65525
+		RTS	R7
+
+NaoVai024:	CMP	PosRel02, #5
+		BEQ	Vai025
+		JMP	NaoVai025
+Vai025:		JSR     R7, Eh5
+		MOV	R4, 65525
+		RTS	R7
+
+NaoVai025:	CMP	PosRel02, #6
+		BEQ	Vai026
+		JMP	NaoVai026
+Vai026:		JSR     R7, Eh6
+		MOV	R4, 65525
+		RTS	R7
+
+NaoVai026:	CMP	PosRel02, #7
+		BEQ	Vai027
+		JMP	NaoVai027
+Vai027:		JSR     R7, Eh7
+		MOV	R4, 65525
+		RTS	R7
+
+NaoVai027:	CMP	PosRel02, #8
+		BEQ	Vai028
+		JMP	NaoVai028
+Vai028:		JSR     R7, Eh8
+		MOV	R4, 65525
+		RTS	R7
+
+NaoVai028:	CMP	PosRel02, #9
+		BEQ	Vai029
+		JMP	NaoVai029
+Vai029:		JSR     R7, Eh9
+		MOV	R4, 65525
+NaoVai029:	RTS	R7
+
+;---------------------------------------
+
+Printar03:	TST	PosRel03
+		BEQ	Vai030
+		JMP	NaoVai030
+Vai030:		JSR     R7, Eh0
+		MOV	R4, 65524
+		RTS	R7
+
+NaoVai030:	CMP	PosRel03, #1
+		BEQ	Vai031
+		JMP	NaoVai031
+Vai031:		JSR     R7, Eh1
+		MOV	R4, 65524
+		RTS	R7
+
+NaoVai031:	CMP	PosRel03, #2
+		BEQ	Vai032
+		JMP	NaoVai032
+Vai032:		JSR     R7, Eh2
+		MOV	R4, 65524
+		RTS	R7
+
+NaoVai032:	CMP	PosRel03, #3
+		BEQ	Vai033
+		JMP	NaoVai033
+Vai033:		JSR     R7, Eh3
+		MOV	R4, 65524
+		RTS	R7
+
+NaoVai033:	CMP	PosRel03, #4
+		BEQ	Vai034
+		JMP	NaoVai034
+Vai034:		JSR     R7, Eh4
+		MOV	R4, 65524
+		RTS	R7
+
+NaoVai034:	CMP	PosRel03, #5
+		BEQ	Vai035
+		JMP	NaoVai035
+Vai035:		JSR     R7, Eh5
+		MOV	R4, 65524
+		RTS	R7
+
+NaoVai035:	CMP	PosRel03, #6
+		BEQ	Vai036
+		JMP	NaoVai036
+Vai036:		JSR     R7, Eh6
+		MOV	R4, 65524
+		RTS	R7
+
+NaoVai036:	CMP	PosRel03, #7
+		BEQ	Vai037
+		JMP	NaoVai037
+Vai037:		JSR     R7, Eh7
+		MOV	R4, 65524
+		RTS	R7
+
+NaoVai037:	CMP	PosRel03, #8
+		BEQ	Vai038
+		JMP	NaoVai038
+Vai038:		JSR     R7, Eh8
+		MOV	R4, 65524
+		RTS	R7
+
+NaoVai038:	CMP	PosRel03, #9
+		BEQ	Vai039
+		JMP	NaoVai039
+Vai039:		JSR     R7, Eh9
+		MOV	R4, 65524
+NaoVai039:	RTS	R7
+
+;--------------------------------------------
+;--------------------------------------------
+
+Rel1Invisivel:
+
+		MOV	#' ', 65535
+		MOV	#' ', 65534
+		MOV	#' ', 65533
+		MOV	#' ', 65532
+		MOV	#' ', 65531
+		RTS	R7
+
+
+PrintarRel1:	JSR	R7, Printar10
+		JSR	R7, Printar11
+		JSR	R7, Printar12
+		JSR	R7, Printar13
+		MOV	#':', 65533
+		RTS	R7
+		
+
+Printar10:	CMP	PosRel10, #10
+		BNE	Continua1
+		CLR	PosRel10
+Continua1:	TST	PosRel10
+		BEQ	Vai100
+		JMP	NaoVai100
+Vai100:		JSR     R7, Eh0
+		MOV	R4, 65535
+		RTS	R7
+
+NaoVai100:	CMP	PosRel10, #1
+		BEQ	Vai101
+		JMP	NaoVai101
+Vai101:		JSR     R7, Eh1
+		MOV	R4, 65535
+		RTS	R7
+
+NaoVai101:	CMP	PosRel10, #2
+		BEQ	Vai102
+		JMP	NaoVai102
+Vai102:		JSR     R7, Eh2
+		MOV	R4, 65535
+		RTS	R7
+
+NaoVai102:	CMP	PosRel10, #3
+		BEQ	Vai103
+		JMP	NaoVai103
+Vai103:		JSR     R7, Eh3
+		MOV	R4, 65535
+		RTS	R7
+
+NaoVai103:	CMP	PosRel10, #4
+		BEQ	Vai104
+		JMP	NaoVai104
+Vai104:		JSR     R7, Eh4
+		MOV	R4, 65535
+		RTS	R7
+
+NaoVai104:	CMP	PosRel10, #5
+		BEQ	Vai105
+		JMP	NaoVai105
+Vai105:		JSR     R7, Eh5
+		MOV	R4, 65535
+		RTS	R7
+
+NaoVai105:	CMP	PosRel10, #6
+		BEQ	Vai106
+		JMP	NaoVai106
+Vai106:		JSR     R7, Eh6
+		MOV	R4, 65535
+		RTS	R7
+
+NaoVai106:	CMP	PosRel10, #7
+		BEQ	Vai107
+		JMP	NaoVai107
+Vai107:		JSR     R7, Eh7
+		MOV	R4, 65535
+		RTS	R7
+
+NaoVai107:	CMP	PosRel10, #8
+		BEQ	Vai108
+		JMP	NaoVai108
+Vai108:		JSR     R7, Eh8
+		MOV	R4, 65535
+		RTS	R7
+
+NaoVai108:	CMP	PosRel10, #9
+		BEQ	Vai109
+		JMP	NaoVai109
+Vai109:		JSR     R7, Eh9
+		MOV	R4, 65535
+NaoVai109:	RTS	R7
+
+;---------------------------------------
+
+
+Printar11:	TST	PosRel11
+		BEQ	Vai110
+		JMP	NaoVai110
+Vai110:		JSR     R7, Eh0
+		MOV	R4, 65534
+		RTS	R7
+
+NaoVai110:	CMP	PosRel11, #1
+		BEQ	Vai111
+		JMP	NaoVai111
+Vai111:		JSR     R7, Eh1
+		MOV	R4, 65534
+		RTS	R7
+
+NaoVai111:	CMP	PosRel11, #2
+		BEQ	Vai112
+		JMP	NaoVai112
+Vai112:		JSR     R7, Eh2
+		MOV	R4, 65534
+		RTS	R7
+
+NaoVai112:	CMP	PosRel11, #3
+		BEQ	Vai113
+		JMP	NaoVai113
+Vai113:		JSR     R7, Eh3
+		MOV	R4, 65534
+		RTS	R7
+
+NaoVai113:	CMP	PosRel11, #4
+		BEQ	Vai114
+		JMP	NaoVai114
+Vai114:		JSR     R7, Eh4
+		MOV	R4, 65534
+		RTS	R7
+
+NaoVai114:	CMP	PosRel11, #5
+		BEQ	Vai115
+		JMP	NaoVai115
+Vai115:		JSR     R7, Eh5
+		MOV	R4, 65534
+		RTS	R7
+
+NaoVai115:	CMP	PosRel11, #6
+		BEQ	Vai116
+		JMP	NaoVai116
+Vai116:		JSR     R7, Eh6
+		MOV	R4, 65534
+		RTS	R7
+
+NaoVai116:	CMP	PosRel11, #7
+		BEQ	Vai117
+		JMP	NaoVai117
+Vai117:		JSR     R7, Eh7
+		MOV	R4, 65534
+		RTS	R7
+
+NaoVai117:	CMP	PosRel11, #8
+		BEQ	Vai118
+		JMP	NaoVai118
+Vai118:		JSR     R7, Eh8
+		MOV	R4, 65534
+		RTS	R7
+
+NaoVai118:	CMP	PosRel11, #9
+		BEQ	Vai119
+		JMP	NaoVai119
+Vai119:		JSR     R7, Eh9
+		MOV	R4, 65534
+NaoVai119:	RTS	R7
+
+;---------------------------------------
+
+
+Printar12:	TST	PosRel12
+		BEQ	Vai120
+		JMP	NaoVai120
+Vai120:		JSR     R7, Eh0
+		MOV	R4, 65532
+		RTS	R7
+
+NaoVai120:	CMP	PosRel12, #1
+		BEQ	Vai121
+		JMP	NaoVai121
+Vai121:		JSR     R7, Eh1
+		MOV	R4, 65532
+		RTS	R7
+
+NaoVai121:	CMP	PosRel12, #2
+		BEQ	Vai122
+		JMP	NaoVai122
+Vai122:		JSR     R7, Eh2
+		MOV	R4, 65532
+		RTS	R7
+
+NaoVai122:	CMP	PosRel12, #3
+		BEQ	Vai123
+		JMP	NaoVai123
+Vai123:		JSR     R7, Eh3
+		MOV	R4, 65532
+		RTS	R7
+
+NaoVai123:	CMP	PosRel12, #4
+		BEQ	Vai124
+		JMP	NaoVai124
+Vai124:		JSR     R7, Eh4
+		MOV	R4, 65532
+		RTS	R7
+
+NaoVai124:	CMP	PosRel12, #5
+		BEQ	Vai125
+		JMP	NaoVai125
+Vai125:		JSR     R7, Eh5
+		MOV	R4, 65532
+		RTS	R7
+
+NaoVai125:	CMP	PosRel12, #6
+		BEQ	Vai126
+		JMP	NaoVai126
+Vai126:		JSR     R7, Eh6
+		MOV	R4, 65532
+		RTS	R7
+
+NaoVai126:	CMP	PosRel12, #7
+		BEQ	Vai127
+		JMP	NaoVai127
+Vai127:		JSR     R7, Eh7
+		MOV	R4, 65532
+		RTS	R7
+
+NaoVai127:	CMP	PosRel12, #8
+		BEQ	Vai128
+		JMP	NaoVai128
+Vai128:		JSR     R7, Eh8
+		MOV	R4, 65532
+		RTS	R7
+
+NaoVai128:	CMP	PosRel12, #9
+		BEQ	Vai129
+		JMP	NaoVai129
+Vai129:		JSR     R7, Eh9
+		MOV	R4, 65532
+NaoVai129:	RTS	R7
+
+;---------------------------------------
+
+Printar13:	TST	PosRel13
+		BEQ	Vai130
+		JMP	NaoVai130
+Vai130:		JSR     R7, Eh0
+		MOV	R4, 65531
+		RTS	R7
+
+NaoVai130:	CMP	PosRel13, #1
+		BEQ	Vai131
+		JMP	NaoVai131
+Vai131:		JSR     R7, Eh1
+		MOV	R4, 65531
+		RTS	R7
+
+NaoVai131:	CMP	PosRel13, #2
+		BEQ	Vai132
+		JMP	NaoVai132
+Vai132:		JSR     R7, Eh2
+		MOV	R4, 65531
+		RTS	R7
+
+NaoVai132:	CMP	PosRel13, #3
+		BEQ	Vai133
+		JMP	NaoVai133
+Vai133:		JSR     R7, Eh3
+		MOV	R4, 65531
+		RTS	R7
+
+NaoVai133:	CMP	PosRel13, #4
+		BEQ	Vai134
+		JMP	NaoVai134
+Vai134:		JSR     R7, Eh4
+		MOV	R4, 65531
+		RTS	R7
+
+NaoVai134:	CMP	PosRel13, #5
+		BEQ	Vai135
+		JMP	NaoVai135
+Vai135:		JSR     R7, Eh5
+		MOV	R4, 65531
+		RTS	R7
+
+NaoVai135:	CMP	PosRel03, #6
+		BEQ	Vai136
+		JMP	NaoVai136
+Vai136:		JSR     R7, Eh6
+		MOV	R4, 65531
+		RTS	R7
+
+NaoVai136:	CMP	PosRel13, #7
+		BEQ	Vai137
+		JMP	NaoVai137
+Vai137:		JSR     R7, Eh7
+		MOV	R4, 65531
+		RTS	R7
+
+NaoVai137:	CMP	PosRel13, #8
+		BEQ	Vai138
+		JMP	NaoVai138
+Vai138:		JSR     R7, Eh8
+		MOV	R4, 65531
+		RTS	R7
+
+NaoVai138:	CMP	PosRel13, #9
+		BEQ	Vai139
+		JMP	NaoVai139
+Vai139:		JSR     R7, Eh9
+		MOV	R4, 65531
+NaoVai139:	RTS	R7
+
+;--------------------------------------------------------------------
+
+Eh0:		MOV	#'0', R4
+		RTS	R7
+Eh1:		MOV	#'1', R4
+		RTS	R7
+Eh2:		MOV	#'2', R4
+		RTS	R7
+Eh3:  		MOV	#'3', R4
+		RTS	R7
+Eh4:		MOV	#'4', R4
+		RTS	R7
+Eh5:		MOV	#'5', R4
+		RTS	R7
+Eh6:		MOV	#'6', R4
+		RTS	R7
+Eh7:		MOV	#'7', R4
+		RTS	R7
+Eh8:		MOV	#'8', R4
+		RTS	R7
+Eh9:		MOV	#'9', R4
+		RTS	R7
+
+;----------------------------------------------------------------------------------------------------
+;----------------------------------------------------------------------------------------------------
+
+PiscarCursor:	
+		INC	ContPiscadas
+		CMP	ContPiscadas, #5
+		BEQ	Pisca
+		JMP	FimPiscar
+
+Pisca:		clr	ContPiscadas
+		TST	PiscadaAtiva
+		BEQ	NotPisca1
+		CLR	PiscadaAtiva
+		MOV	Posicao, R1
+		MOV	TeclaNoCursor, (R1) 
+		JMP	FimPiscar	
+NotPisca1:	MOV	#1, PiscadaAtiva
+		MOV	Posicao, R1
+		MOV	#'_', (R1)
+		JMP	FimPiscar
+
+FimPiscar: 	RTS	R7
+
+
+;**************************************************************************************************
+; Variaveis do programa
+; Ocupam a memória logo após o final do programa		
+
+Teclado:	dw		0
+Cursor:		dw		0
+Posicao:	dw		0		; Endereço no visor da posição atual do cursor
+KbhitAtiva:	dw		0
+GetCharAtivo:   dw		0		; Quando esta variável esta em 1, esta em execução a função getchar
+PosNoVisor:	dw		0
+TeclaNoCursor:	dw		0		; Variavel que guarda a tecla que esta na popsicao atual
+TeclaNoant:	dw		0		;	
+AndandoRel0:	dw		0		; Se está com valor 1, relogio está andando, em 0 está parado 
+AndandoRel1:	dw		0
+ContTimer:	dw		0
+ContPiscadas:	dw		0
+PiscadaAtiva:	dw		0
+ContSegTotal0:	dw		0
+ContSegTotal1:  dw		0
+ContIntTotal0:	dw		0
+ContIntTotal1:	dw		0
+ContUSeg0:	dw		0		;contador de interrupcoes unidade de segundos
+ContDSeg0:	dw		0		;contador de interrupcoes dezena de segundos
+ContUMin0:	dw		0		;contador de interrupcoes unidade de minutos
+ContDMin0:	dw		0		;contador de interrupcoes dezena de minutos
+ContUSeg1:	dw		0		;contador de interrupcoes unidade de segundos
+ContDSeg1:	dw		0		;contador de interrupcoes dezena de segundos
+ContUMin1:	dw		0		;contador de interrupcoes unidade de minutos
+ContDMin1:	dw		0		;contador de interrupcoes dezena de minutos
+PrintaRel0:	dw		0
+PrintaRel1:	dw		0		
+PosRel00:	dw		0		; Relogio0 = PosRel03 PosRel02 : PosRel01 PosRel00
+PosRel01:	dw		0
+PosRel02:	dw		0
+PosRel03:	dw		0
+PosRel10:	dw		0		; Relogio1 = PosRel13 PosRel12 : PosRel11 PosRel10
+PosRel11:	dw		0
+PosRel12:	dw		0
+PosRel13:	dw		0
